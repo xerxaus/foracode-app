@@ -115,30 +115,66 @@ export function DashboardClient() {
     }
 
     setUploading(true);
-    setUploadProgress(10);
+    setUploadProgress(5);
 
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('name', file?.name ?? 'package.zip');
-
-      setUploadProgress(30);
-
-      const res = await fetch('/api/upload', {
+      // ── Adım 1: Sunucudan Presigned URL al ──────────────────────────────
+      const presignRes = await fetch('/api/upload/presign', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: file?.name ?? 'package.zip',
+          contentType: 'application/zip',
+        }),
       });
 
-      setUploadProgress(80);
+      const presignData = await presignRes?.json?.() ?? {};
+      if (!presignRes?.ok) {
+        throw new Error(presignData?.error ?? 'Could not get upload URL');
+      }
 
-      const data = await res?.json?.() ?? {};
+      const { presignedUrl, zipStoragePath, packageId } = presignData as {
+        presignedUrl: string;
+        zipStoragePath: string;
+        packageId: string;
+      };
 
-      if (!res?.ok) {
-        throw new Error(data?.error ?? 'Upload failed');
+      setUploadProgress(15);
+
+      // ── Adım 2: Dosyayı DOĞRUDAN S3'e yükle (Vercel'i atla) ────────────
+      const s3Res = await fetch(presignedUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/zip' },
+        body: file,
+      });
+
+      if (!s3Res.ok) {
+        throw new Error(`S3 upload failed: ${s3Res.status} ${s3Res.statusText}`);
+      }
+
+      setUploadProgress(70);
+
+      // ── Adım 3: Sunucuya "extract et ve kaydet" komutunu ver ────────────
+      const processRes = await fetch('/api/upload/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          zipStoragePath,
+          packageId,
+          fileName: file?.name ?? 'package.zip',
+          fileSize: file?.size ?? 0,
+        }),
+      });
+
+      setUploadProgress(95);
+
+      const processData = await processRes?.json?.() ?? {};
+      if (!processRes?.ok) {
+        throw new Error(processData?.error ?? 'Processing failed');
       }
 
       setUploadProgress(100);
-      toast.success(`Package "${data?.package?.name ?? 'Unknown'}" uploaded successfully!`);
+      toast.success(`Package "${processData?.package?.name ?? 'Unknown'}" uploaded successfully!`);
       await fetchPackages();
     } catch (err: any) {
       console.error('Upload error:', err?.message);
